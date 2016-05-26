@@ -31,14 +31,26 @@ install() {
   for keyType in $keyTypes; do
     eval state=\$dropbear_${keyType}_key
     local msgKeyType=$(echo "$keyType" | tr '[:lower:]' '[:upper:]')
+    local bypassOpenSSH=0
 
     [[ -z "$state" ]] && state=GENERATE
 
     local osshKey="${tmpDir}/${keyType}.ossh"
     local dropbearKey="${tmpDir}/${keyType}.dropbear"
     local installKey="/etc/dropbear/dropbear_${keyType}_host_key"
+
     
     case ${state} in
+      DROPBEAR )
+        eval dropbearPrivKeyFile=\$dropbear_${keyType}_prv_key_file
+        local dropbearPrivKey=${dropbearPrivKeyFile}
+        [[ -f ${dropbearPrivKey} ]] || {
+          derror "Cannot access the dropbear private key file ${dropbearPrivKey}"
+          return 1
+        }
+        bypassOpenSSH=1
+        cp ${dropbearPrivKey} $dropbearKey
+        ;;
       GENERATE )
         ssh-keygen -t $keyType -f $osshKey -q -N "" || {
           derror "SSH ${msgKeyType} key creation failed"
@@ -71,16 +83,24 @@ install() {
         ;;
     esac
     
-    #convert the keys from openssh to dropbear format
-    dropbearconvert openssh dropbear $osshKey $dropbearKey > /dev/null 2>&1 || {
-      derror "dropbearconvert for ${msgKeyType} key failed"
-      rm -rf "$tmpDir"
-      return 1
-    }
+    if [[ "$bypassOpenSSH" == 0 ]]; then
+      #convert the keys from openssh to dropbear format
+      dropbearconvert openssh dropbear $osshKey $dropbearKey > /dev/null 2>&1 || {
+        derror "dropbearconvert for ${msgKeyType} key failed"
+        rm -rf "$tmpDir"
+        return 1
+      }
+      local keyFingerprint=$(ssh-keygen -l -f "${osshKey}")
+      local keyBubble=$(ssh-keygen -B -f "${osshKey}")
+    else
+      # Extract the associated public key from the dropbear private key.
+      local dropPubKey="${tmpDir}/${keyType}.drop.pub"
+      dropbearkey -f "${dropbearPrivKey}" -y | awk -v pat="${keyType}" '$1 ~ pat {print $0}' > ${dropPubKey}
+      local keyFingerprint=$(ssh-keygen -l -f "${dropPubKey}")
+      local keyBubble=$(ssh-keygen -B -f "${dropPubKey}")
+    fi
 
     #install and show some information
-    local keyFingerprint=$(ssh-keygen -l -f "${osshKey}")
-    local keyBubble=$(ssh-keygen -B -f "${osshKey}")
     dinfo "Boot SSH ${msgKeyType} key parameters: "
     dinfo "  fingerprint: ${keyFingerprint}"
     dinfo "  bubblebabble: ${keyBubble}"
